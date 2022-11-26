@@ -9,6 +9,9 @@
 #include <logging.h>
 #include <string.h>
 #include <errno.h>
+#include <argv_lib.h>
+#include <fcntl.h>
+#include <sys/poll.h>
 
 #define DEFAULT_IP "127.0.0.1"
 #define DEFAULT_PORT 2002
@@ -137,6 +140,13 @@ t_serverdata *init_server(t_args *args)
 	data->run = 0;
 	data->fd = sock_fd;
 
+	if(fcntl(sock_fd, F_SETFL, O_NONBLOCK) < 0) {
+		log_error("fcntl(): %s", strerror(errno));
+		destroy_server(data);
+		return (NULL);
+
+	}
+	
 	if (bind(sock_fd, (struct sockaddr *)data->addr, sizeof(*data->addr)) < 0) {
 		log_error("bind(): %s", strerror(errno));
 		destroy_server(data);
@@ -192,21 +202,24 @@ ssize_t send_to_client(t_client *client, char *data)
 	return (send(client->fd, data, strlen(data), 0));
 }
 
-void *client_stuff(void *p)
+ int client_stuff(void *p)
 {
 	t_client *client = p;
 
 	log_info("Sending welcome message...");
 	if (send_to_client(client, "Hello, world!\n") == -1) {
 		log_error("Message couldn't send. Connection terminating...");
-		destroy_client(client);
-		return (NULL);
+		return (-1);
 	}
 
 	while (1)
 	{
 		char str[2083];
 		ssize_t recieved = recv(client->fd, str, 2083, 0);
+		if (recieved == 0)
+			return (-1);
+		else if (recieved == -1)
+			return (0);
 		str[recieved - 2] = 0;
 		if (*str)
 			log_info("Recieved from [%s:%d]: %s", client->ip, client->port, str);
@@ -222,23 +235,75 @@ void *client_stuff(void *p)
 			}
 		}
 	}
-	destroy_client(client);
-	return (NULL);
+	return (0);
 }
 
 int main(int argc, char **argv, char **env)
 {
 	t_args			*args 			= parse_arguments(argc, argv, env);
 	t_serverdata	*data 			= init_server(args);
-
+	argv_t	*clients;
+	argv_t	*pfd;
+	struct pollfd	*pf;
+	t_client *client;
+	int stat;	
 	if (!data)
-		return (1);
-	
-	while (1) 
-	{
-		t_client *client = accept_client(data);
-		pthread_create(&(client->th_id), NULL, client_stuff, client);
-	}
+		return (1);	
+	clients = argv_new(NULL, NULL);
+	pfd = argv_new(NULL, NULL);
+	pf = malloc(sizeof(*pf));
+	*pf = (struct pollfd){0};
+	pf->fd = data->fd;
+	pf->events = POLLIN;
+	argv_push(pfd, pf);
 
+	while(1)
+	{
+		stat = poll(pfd->vector, pfd->len, -1);
+		if (stat < 0) {
+			dprintf(2, "poll error\n");
+			exit(1);
+		}
+		if (stat == 0) {
+			dprintf(2,"time out\n");
+			exit(1);
+		}
+		int i = 0;
+		while (i < (int)pfd->len)
+		{
+			pf = pfd->vector[i];
+			if (pf->revents == 0) {
+				++i;
+				continue;
+			}
+			if (pf->revents != POLLIN)
+			{
+					argv_del_one(clients, i - 1, (void (*)(void *))destroy_client); // 
+					argv_del_one(pfd, i, free);
+					continue;
+			}
+			if (pf->fd == data->fd)
+			{
+				client = accept_client(data); 
+				if (argv_push(clients, client) < 0)
+					continue;
+				pf = malloc(sizeof(*pf));
+				*pf = (struct pollfd){.fd = client->fd, .events = POLLIN};
+				argv_push(pfd, pf);
+				i++;
+				continue;	
+			}
+			else
+			{
+				if (-1 == client_stuff(clients->vector[i - 1])){
+					argv_del_one(clients, i - 1, (void (*)(void *))destroy_client);
+					argv_del_one(pfd, i, free);
+					--i;
+				}
+			}
+			++i;
+		}
+	}
+	
 	return (0);
 }

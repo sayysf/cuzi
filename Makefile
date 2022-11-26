@@ -4,14 +4,19 @@ CC		= gcc
 CFLAGS	= -Wall -Wextra -Werror -I./includes -g
 LFLAGS	= -lpthread
 NAME	= server
+EXLIB  = ./argv_lib/argv.a
+EXLIBDIR = ./argv_lib
 
-all: $(NAME)
+all: $(EXLIB) $(NAME)
 
 .c.o:
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -I$(EXLIBDIR) -c $< -o $@
 
 $(NAME): $(OBJ)
-	$(CC) $(LFLAGS) $(OBJ) -o $(NAME)
+	$(CC) -I$(EXLIBDIR) $(LFLAGS) $(OBJ) $(EXLIB)   -o $(NAME)
+
+$(EXLIB):
+	make -C ./argv_lib
 
 clean:
 	rm -rf $(OBJ)
